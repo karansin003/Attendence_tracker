@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Register — QUMS Attendance Bot</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="auth-bg">
+    <div class="auth-card">
+      <h1>🎓 Register</h1>
+      <div class="sub">Account banao — 3 steps: register → QUMS setup → done</div>
+      <label class="form-label" for="email">Email (login id)</label>
+      <input class="form-input" id="email" type="email" placeholder="tum@example.com" autocomplete="username" />
+      <label class="form-label" for="password">App password (min 6 chars)</label>
+      <div class="pw-wrap">
+        <input class="form-input" id="password" type="password" placeholder="••••••••" autocomplete="new-password" />
+        <button type="button" class="pw-toggle" data-target="password">👁</button>
+      </div>
+      <div class="form-hint">Attendance alerts <b>Telegram</b> pe aayenge — account banne ke baad dashboard se "Connect Telegram" (ek click) karenge. QUMS ka QID/password NEXT step (QUMS Setup) me daaloge — wo encrypted store hota hai.</div>
+      <div id="error" class="form-error hidden"></div>
+      <div style="margin-top: 18px;"><button id="btn" style="width: 100%;">Create Account</button></div>
+      <div class="auth-foot">Already registered? <a href="/login">Login karo</a></div>
+    </div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    async function submit() {
+      const btn = $('btn'); btn.disabled = true;
+      $('error').classList.add('hidden');
+      try {
+        const res = await fetch('/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: $('email').value.trim(),
+            password: $('password').value,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) { $('error').textContent = data.error || 'Register fail'; $('error').classList.remove('hidden'); return; }
+        location.href = data.redirect || '/qums-setup';
+      } catch (err) {
+        $('error').textContent = err.message; $('error').classList.remove('hidden');
+      } finally { btn.disabled = false; }
+    }
+    $('btn').addEventListener('click', submit);
+    $('password').addEventListener('keydown', (e) => e.key === 'Enter' && submit());
+    // password show/hide toggle
+    document.querySelectorAll('.pw-toggle').forEach((b) =>
+      b.addEventListener('click', () => {
+        const el = document.getElementById(b.dataset.target);
+        el.type = el.type === 'password' ? 'text' : 'password';
+        b.textContent = el.type === 'password' ? '👁' : '🙈';
+      })
+    );
+  </script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — QUMS Attendance Bot</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="auth-bg">
+    <div class="auth-card">
+      <h1>🎓 QUMS Attendance Bot</h1>
+      <div class="sub">Apne account se login karo</div>
+      <label class="form-label" for="email">Email</label>
+      <input class="form-input" id="email" type="email" placeholder="tum@example.com" autocomplete="username" />
+      <label class="form-label" for="password">Password</label>
+      <div class="pw-wrap">
+        <input class="form-input" id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
+        <button type="button" class="pw-toggle" data-target="password">👁</button>
+      </div>
+      <div id="error" class="form-error hidden"></div>
+      <div style="margin-top: 18px;"><button id="btn" style="width: 100%;">Login</button></div>
+      <div class="auth-foot">
+        Account nahi hai? <a href="/register">Register karo</a> ·
+        <a href="/forgot">Password bhool gaye?</a>
+      </div>
+    </div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    async function submit() {
+      const btn = $('btn'); btn.disabled = true;
+      $('error').classList.add('hidden');
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: $('email').value.trim(), password: $('password').value }),
+        });
+        const data = await res.json();
+        if (!res.ok) { $('error').textContent = data.error || 'Login fail'; $('error').classList.remove('hidden'); return; }
+        location.href = data.redirect || '/dashboard';
+      } catch (err) {
+        $('error').textContent = err.message; $('error').classList.remove('hidden');
+      } finally { btn.disabled = false; }
+    }
+    $('btn').addEventListener('click', submit);
+    $('password').addEventListener('keydown', (e) => e.key === 'Enter' && submit());
+    // password show/hide toggle
+    document.querySelectorAll('.pw-toggle').forEach((b) =>
+      b.addEventListener('click', () => {
+        const el = document.getElementById(b.dataset.target);
+        el.type = el.type === 'password' ? 'text' : 'password';
+        b.textContent = el.type === 'password' ? '👁' : '🙈';
+      })
+    );
+  </script>
+</body>
+</html>

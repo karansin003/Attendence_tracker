@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reset Password — QUMS Attendance Bot</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="auth-bg">
+    <div class="auth-card">
+      <h1>🔑 Reset Password</h1>
+      <div class="sub">Naya password set karo (link 1 hour me expire hota hai)</div>
+      <label class="form-label" for="token">Reset token (link me pre-filled hota hai)</label>
+      <input class="form-input" id="token" type="text" placeholder="token" />
+      <label class="form-label" for="password">Naya password (min 6 chars)</label>
+      <div class="pw-wrap">
+        <input class="form-input" id="password" type="password" placeholder="••••••••" autocomplete="new-password" />
+        <button type="button" class="pw-toggle" data-target="password">👁</button>
+      </div>
+      <div id="error" class="form-error hidden"></div>
+      <div style="margin-top: 18px;"><button id="btn" style="width: 100%;">Set New Password</button></div>
+      <div class="auth-foot"><a href="/login">← Login pe wapas</a></div>
+    </div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    // token pre-fill from ?token=...
+    const urlToken = new URLSearchParams(location.search).get('token');
+    if (urlToken) $('token').value = urlToken;
+
+    $('btn').addEventListener('click', async () => {
+      const btn = $('btn'); btn.disabled = true;
+      $('error').classList.add('hidden');
+      try {
+        const res = await fetch('/api/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: $('token').value.trim(), password: $('password').value }),
+        });
+        const data = await res.json();
+        if (!res.ok) { $('error').textContent = data.error || 'Reset fail'; $('error').classList.remove('hidden'); return; }
+        location.href = '/login';
+      } catch (err) {
+        $('error').textContent = err.message; $('error').classList.remove('hidden');
+      } finally { btn.disabled = false; }
+    });
+    // password show/hide toggle
+    document.querySelectorAll('.pw-toggle').forEach((b) =>
+      b.addEventListener('click', () => {
+        const el = document.getElementById(b.dataset.target);
+        el.type = el.type === 'password' ? 'text' : 'password';
+        b.textContent = el.type === 'password' ? '👁' : '🙈';
+      })
+    );
+  </script>
+</body>
+</html>

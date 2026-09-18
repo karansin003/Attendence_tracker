@@ -1,0 +1,97 @@
+/* QUMS Attendance Bot — university-portal style theme */
+:root {
+  --navy: #0d2c54;
+  --navy-2: #14406f;
+  --navy-3: #1b5291;
+  --amber: #f5a623;
+  --amber-dark: #d98c0f;
+  --bg: #eef2f8;
+  --card: #ffffff;
+  --text: #1e2a3a;
+  --muted: #6b7a90;
+  --ok: #16a34a;
+  --bad: #dc2626;
+  --line: #d9e2ef;
+  --shadow: 0 2px 10px rgba(13, 44, 84, 0.08);
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif; background: var(--bg); color: var(--text); }
+
+/* ---- navbar ---- */
+.nav { background: linear-gradient(90deg, var(--navy) 0%, var(--navy-2) 100%); color: #fff; padding: 0 22px; height: 60px; display: flex; align-items: center; justify-content: space-between; box-shadow: var(--shadow); }
+.nav .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.05rem; letter-spacing: .2px; }
+.nav .brand .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px rgba(245,166,35,.25); }
+.nav .links { display: flex; align-items: center; gap: 16px; font-size: .9rem; }
+.nav .links a { color: #cfe0f5; text-decoration: none; }
+.nav .links a:hover { color: #fff; }
+.nav .links .pill { background: rgba(255,255,255,.12); padding: 4px 12px; border-radius: 999px; }
+
+/* ---- layout ---- */
+.container { max-width: 1100px; margin: 0 auto; padding: 24px 16px 60px; }
+.card { background: var(--card); border-radius: 14px; box-shadow: var(--shadow); padding: 22px; margin-bottom: 18px; border: 1px solid var(--line); }
+h1 { font-size: 1.35rem; margin: 0 0 4px; color: var(--navy); }
+.sub { color: var(--muted); font-size: .88rem; margin-bottom: 14px; }
+.section-title { color: var(--navy); font-size: 1.02rem; font-weight: 700; margin: 0 0 10px; }
+
+/* ---- buttons ---- */
+button, .btn { background: var(--navy-2); color: #fff; border: 0; padding: 10px 18px; border-radius: 8px; font-size: .95rem; cursor: pointer; font-weight: 600; }
+button:hover, .btn:hover { background: var(--navy-3); }
+button:disabled { opacity: .55; cursor: wait; }
+button.accent { background: var(--amber); color: #4a2f00; }
+button.accent:hover { background: var(--amber-dark); color: #fff; }
+a.btn { text-decoration: none; display: inline-block; }
+a.btn.accent { background: var(--amber); color: #4a2f00; }
+a.btn.accent:hover { background: var(--amber-dark); color: #fff; }
+button.link { background: none; color: var(--navy-3); text-decoration: underline; padding: 4px 6px; }
+
+/* ---- forms ---- */
+.form-label { display: block; font-size: .82rem; font-weight: 700; color: var(--navy-2); margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+.form-input { width: 100%; padding: 11px 13px; border: 1.5px solid var(--line); border-radius: 8px; font-size: .95rem; background: #fbfcfe; }
+.form-input:focus { outline: none; border-color: var(--navy-3); background: #fff; }
+.form-error { background: #fdecec; border: 1px solid #f5b5b5; color: #b21d1d; padding: 10px 14px; border-radius: 8px; font-size: .88rem; margin-top: 12px; }
+.form-ok { background: #e9f7ee; border: 1px solid #b7e2c6; color: #116b34; padding: 10px 14px; border-radius: 8px; font-size: .88rem; margin-top: 12px; }
+.form-hint { color: var(--muted); font-size: .8rem; margin-top: 6px; }
+.pw-wrap { position: relative; }
+.pw-wrap .form-input { padding-right: 46px; }
+.pw-toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: 0; font-size: 1.15rem; cursor: pointer; padding: 6px 8px; line-height: 1; color: var(--muted); }
+.pw-toggle:hover { background: none; color: var(--navy-3); }
+
+/* ---- auth pages ---- */
+.auth-bg { min-height: 100vh; background: linear-gradient(135deg, var(--navy) 0%, var(--navy-3) 100%); display: flex; align-items: center; justify-content: center; padding: 28px 16px; }
+.auth-card { width: 100%; max-width: 420px; background: #fff; border-radius: 16px; box-shadow: 0 10px 40px rgba(0,0,0,.25); padding: 30px 28px; }
+.auth-card h1 { text-align: center; }
+.auth-card .sub { text-align: center; }
+.auth-foot { text-align: center; font-size: .85rem; color: var(--muted); margin-top: 16px; }
+.auth-foot a { color: var(--navy-3); }
+
+/* ---- chips ---- */
+.chips { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+.chip { background: var(--card); border: 1px solid var(--line); padding: 8px 14px; border-radius: 999px; font-size: .84rem; color: var(--muted); box-shadow: var(--shadow); }
+.chip b { color: var(--navy); font-size: 1rem; margin-left: 4px; }
+
+/* ---- table ---- */
+table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 12px; overflow: hidden; }
+th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--line); font-size: .92rem; vertical-align: top; }
+thead th { background: var(--navy-2); color: #fff; text-transform: uppercase; font-size: .7rem; letter-spacing: .07em; }
+tr:last-child td { border-bottom: 0; }
+tr:nth-child(even) td { background: #f7f9fd; }
+.pct-ok { color: var(--ok); font-weight: 700; }
+.pct-bad { color: var(--bad); font-weight: 700; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .74rem; font-weight: 700; }
+.badge.ok { background: #e9f7ee; color: var(--ok); }
+.badge.bad { background: #fdecec; color: var(--bad); }
+.guidance { color: var(--muted); font-size: .84rem; }
+
+/* ---- banners ---- */
+.banner { padding: 12px 16px; border-radius: 10px; font-size: .9rem; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.banner.warn { background: #fff7e6; border: 1px solid #f3d9a4; color: #7a5200; }
+.banner.info { background: #e8f1fd; border: 1px solid #bcd4f2; color: var(--navy-2); }
+.banner a { color: var(--navy-3); font-weight: 700; }
+
+/* ---- misc ---- */
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.captcha-img { display: block; max-width: 260px; border-radius: 8px; border: 1.5px solid var(--line); margin: 10px 0; background: #fff; }
+.steps { margin: 0; padding-left: 18px; color: var(--muted); font-size: .88rem; }
+.steps li { margin-bottom: 6px; }
+footer { margin-top: 26px; color: var(--muted); font-size: .78rem; line-height: 1.6; }
+.hidden { display: none !important; }
