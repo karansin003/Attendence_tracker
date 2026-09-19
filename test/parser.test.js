@@ -24,9 +24,22 @@ function check(label, actual, expected) {
   if (!pass) failures++;
 }
 
-/** Extract a top-level `function name() {...}` from the source (closing brace at column 0). */
+/** Extract a top-level `function name() {...}` from the source (closing brace at column 0).
+ * NOTE: scraper.js ke andar PURANA single-user scraper line-commented pada hai —
+ * isliye `//`-prefixed matches SKIP karo aur sirf ACTIVE (uncommented) copy uthao. */
 function extractFunction(src, name) {
-  const start = src.indexOf(`function ${name}() {`);
+  const sig = `function ${name}() {`;
+  let start = -1;
+  let idx = src.indexOf(sig);
+  while (idx !== -1) {
+    const lineStart = src.lastIndexOf('\n', idx) + 1;
+    const linePrefix = src.slice(lineStart, idx).trim();
+    if (!linePrefix.startsWith('//')) {
+      start = idx; // active (uncommented) definition mili
+      break;
+    }
+    idx = src.indexOf(sig, idx + 1);
+  }
   if (start === -1) throw new Error(`${name} not found in ${scraperPath}`);
   const end = src.indexOf('\n}', start);
   if (end === -1) throw new Error(`closing brace of ${name} not found`);
@@ -190,28 +203,28 @@ function extractFunction(src, name) {
   // ---- Task 2: weekly schedule cache (upsert/fresh/clear) ----
   const dbMod = require(path.join(__dirname, '..', 'src', 'db.js'));
   const TUID = 'unit-test-weekly-user';
-  dbMod.clearWeeklySchedule(TUID); // clean slate
-  check('cache: empty -> not fresh', dbMod.getWeeklySchedule(TUID, 3).fresh, false);
-  dbMod.upsertWeeklySchedule(TUID, 3, [
+  await dbMod.clearWeeklySchedule(TUID); // clean slate
+  check('cache: empty -> not fresh', (await dbMod.getWeeklySchedule(TUID, 3)).fresh, false);
+  await dbMod.upsertWeeklySchedule(TUID, 3, [
     { period: 'P2', subject: 'DSA', subjectCode: 'CS35303', teacher: 'RAO', room: 'L-202' },
     { period: 'P3', subject: 'Cloud', subjectCode: 'CS35304', teacher: 'MEHRA', room: 'L-204' },
   ]);
-  const cached = dbMod.getWeeklySchedule(TUID, 3);
+  const cached = await dbMod.getWeeklySchedule(TUID, 3);
   check('cache: after upsert -> fresh', cached.fresh, true);
   check('cache: rows shape', [cached.rows[0].period, cached.rows[0].teacher, cached.rows[0].room], ['P2', 'RAO', 'L-202']);
   // upsert same period -> update (no duplicate)
-  dbMod.upsertWeeklySchedule(TUID, 3, [{ period: 'P2', subject: 'DSA', subjectCode: 'CS35303', teacher: 'RAO-2', room: 'L-209' }]);
-  check('cache: upsert dedupe by period', dbMod.getWeeklySchedule(TUID, 3).rows.length, 2);
-  check('cache: updated teacher', dbMod.getWeeklySchedule(TUID, 3).rows[0].teacher, 'RAO-2');
+  await dbMod.upsertWeeklySchedule(TUID, 3, [{ period: 'P2', subject: 'DSA', subjectCode: 'CS35303', teacher: 'RAO-2', room: 'L-209' }]);
+  check('cache: upsert dedupe by period', (await dbMod.getWeeklySchedule(TUID, 3)).rows.length, 2);
+  check('cache: updated teacher', (await dbMod.getWeeklySchedule(TUID, 3)).rows[0].teacher, 'RAO-2');
   // stale simulation: 8 din aage jao -> fresh false
   const realNow = Date.now;
   // eslint-disable-next-line no-global-assign
   Date.now = () => realNow() + 8 * 24 * 60 * 60 * 1000;
-  check('cache: 8 din baad stale', dbMod.getWeeklySchedule(TUID, 3).fresh, false);
+  check('cache: 8 din baad stale', (await dbMod.getWeeklySchedule(TUID, 3)).fresh, false);
   // eslint-disable-next-line no-global-assign
   Date.now = realNow;
-  dbMod.clearWeeklySchedule(TUID); // cleanup
-  check('cache: clear -> not fresh', dbMod.getWeeklySchedule(TUID, 3).fresh, false);
+  await dbMod.clearWeeklySchedule(TUID); // cleanup
+  check('cache: clear -> not fresh', (await dbMod.getWeeklySchedule(TUID, 3)).fresh, false);
 
   // merged rows ka morning-message format (room + teacher dono dikhen)
   const mergedSched = formatMorningSchedule(merged);
@@ -295,17 +308,19 @@ function extractFunction(src, name) {
   check('tg: isConfigured matches token presence', telegram.isConfigured(), Boolean(process.env.TELEGRAM_BOT_TOKEN));
 
   // deep-link DB roundtrip — throwaway user (test ke baad delete, real data clean)
-  const dummy = db.createUser({ email: 'tg-link-test@local', passwordHash: 'x' });
-  const code = db.telegramLinkCodeFor(dummy.id);
+  const dummy = await db.createUser({ email: 'tg-link-test@local', passwordHash: 'x' });
+  const code = await db.telegramLinkCodeFor(dummy.id);
   check('tg: link code generated', typeof code === 'string' && code.length === 12, true);
-  check('tg: lookup by code', db.getUserByTelegramLinkCode(code) && db.getUserByTelegramLinkCode(code).id, dummy.id);
-  check('tg: unknown code -> null', db.getUserByTelegramLinkCode('deadbeefdead'), null);
-  db.setTelegramChatId(dummy.id, '555000111');
-  check('tg: chatId saved + chat lookup', db.getUserByTelegramChatId('555000111') && db.getUserByTelegramChatId('555000111').id, dummy.id);
+  const byCode = await db.getUserByTelegramLinkCode(code);
+  check('tg: lookup by code', byCode && byCode.id, dummy.id);
+  check('tg: unknown code -> null', await db.getUserByTelegramLinkCode('deadbeefdead'), null);
+  await db.setTelegramChatId(dummy.id, '555000111');
+  const byChat = await db.getUserByTelegramChatId('555000111');
+  check('tg: chatId saved + chat lookup', byChat && byChat.id, dummy.id);
   check('tg: deepLink format', telegram.deepLink(code), `https://t.me/${telegram.BOT_USERNAME}?start=${code}`);
-  check('tg: code stable (regenerate same)', db.telegramLinkCodeFor(dummy.id), code);
-  db.deleteUser(dummy.id);
-  check('tg: throwaway user removed', db.getUserByTelegramLinkCode(code), null);
+  check('tg: code stable (regenerate same)', await db.telegramLinkCodeFor(dummy.id), code);
+  await db.deleteUser(dummy.id);
+  check('tg: throwaway user removed', await db.getUserByTelegramLinkCode(code), null);
   check('tg: sendMessage without bot/link -> false (no crash)', await telegram.sendMessage('nonexistent-user', 'x'), false);
 
   // ---- 8b. qums-login-web: HEADLESS captcha relay exports (koi visible window nahi) ----
@@ -356,6 +371,77 @@ function extractFunction(src, name) {
   check('morning: room missing -> teacher only', formatMorningSchedule([
     { period: '(P1)09:00 - 09:55', duration: '09:00 - 09:55', subject: 'X', subjectCode: 'XC1', room: '', teacher: 'T1', raw: 'x' },
   ]).includes('    T1'), true);
+
+  // ---- 9b. mailer (forgot-password: Resend -> SMTP fallback -> console) ----
+  const mailer = require(path.join(__dirname, '..', 'src', 'mailer.js'));
+  {
+    // env save/restore — baaki tests ka env na bigde
+    const saved = {};
+    for (const k of ['RESEND_API_KEY', 'RESEND_FROM', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM']) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    try {
+      check('mailer: console mode jab kuch configured nahi', mailer.mailerProvider(), 'console');
+      check('mailer: smtpConfig null jab env nahi', mailer.smtpConfig(), null);
+
+      process.env.SMTP_HOST = 'smtp.test';
+      process.env.SMTP_USER = 'u@test';
+      process.env.SMTP_PASS = 'secret';
+      check('mailer: smtp provider jab sirf SMTP set', mailer.mailerProvider(), 'smtp');
+      check('mailer: smtp 587 -> STARTTLS (secure:false)', mailer.smtpConfig().secure, false);
+      process.env.SMTP_PORT = '465';
+      check('mailer: smtp 465 -> implicit TLS (secure:true)', mailer.smtpConfig().secure, true);
+      check('mailer: SMTP_PASS config me jaata hai, log me nahi', mailer.smtpConfig().auth.pass, 'secret');
+
+      process.env.RESEND_API_KEY = 're_test_key_123';
+      check('mailer: resend provider RESEND_API_KEY pe priority leta hai', mailer.mailerProvider(), 'resend');
+
+      const content = mailer.buildResetEmail('https://app.example/reset?token=abc123');
+      check('mailer: subject me password reset', content.subject.includes('password reset'), true);
+      check('mailer: link text me', content.text.includes('/reset?token=abc123'), true);
+      check('mailer: link html (anchor + raw) me', content.html.includes('href="https://app.example/reset?token=abc123"'), true);
+      check('mailer: 1-hour validity bataya', content.text.includes('1 hour valid'), true);
+
+      // sendMail -> Resend (fake SDK client inject kiya — koi network nahi)
+      let captured = { created: 0 };
+      class FakeResend {
+        constructor(apiKey) {
+          captured.key = apiKey;
+          captured.created += 1;
+        }
+        // eslint-disable-next-line class-methods-use-this
+        get emails() {
+          return {
+            send: async (p) => {
+              captured.payload = p;
+              return { data: { id: 'em_123' }, error: null };
+            },
+          };
+        }
+      }
+      const sent = await mailer.sendMail({ to: 'student@example.com', ...content }, { ResendImpl: FakeResend, from: 'Test <test@x.dev>' });
+      check('mailer: resend send ok', [sent.ok, sent.via], [true, 'resend']);
+      check('mailer: API key SDK ko di (server log me kabhi nahi)', captured.key, 're_test_key_123');
+      check('mailer: from override respected', captured.payload.from, 'Test <test@x.dev>');
+      check('mailer: to/subject/text/html payload me', [captured.payload.to, captured.payload.subject === content.subject], ['student@example.com', true]);
+
+      // SDK-style API error ({ data: null, error }) -> ok:false, no throw
+      class FailingResend {
+        // eslint-disable-next-line class-methods-use-this
+        get emails() {
+          return { send: async () => ({ data: null, error: { message: 'domain not verified' } }) };
+        }
+      }
+      const failed = await mailer.sendMail({ to: 'student@example.com', ...content }, { ResendImpl: FailingResend });
+      check('mailer: resend API error -> ok:false + via:resend', [failed.ok, failed.via, failed.error], [false, 'resend', 'domain not verified']);
+    } finally {
+      for (const k of Object.keys(saved)) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  }
 
   // ---- 9. scheduler cron (Fix #1: morning 8:30 AM, summary 9 PM) ----
   const { MORNING_CRON, SUMMARY_CRON, TIMEZONE: SCHED_TZ } = require(path.join(__dirname, '..', 'src', 'scheduler.js'));

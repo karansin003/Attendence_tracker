@@ -1,36 +1,4 @@
-/**
- * QUMS scraper — API-first approach (v2, reverse-engineered from the live
- * portal's own JavaScript).
- *
- * The dashboard's "Year/Sem Wise Attendance Summary" is a jqGrid populated by
- * an AJAX button-click, so DOM scraping is fragile. Instead we call the same
- * endpoints the portal itself calls, reusing session_state.json cookies:
- *
- *   GET  /Web_StudentAcademic/Cyborg_S_Dashboard   (page HTML -> RegID + YearSem)
- *   POST /Web_StudentAcademic/GetYearSemWiseAttendance  { RegID, YearSem }
- *        -> { data: "[{Subject, SubjectCode, Percentage, Toper,
- *                       TotalLecture, TotalPresent, TotalAbsent, TotalLeave}, ...]",
- *             state: "[{DateFrom, DateTo, TotalPercentage}]" }
- *
- * This returns EXACT attended/total counts — no estimation needed.
- *
- * NAVIGATION POLICY (no UI clicks): kabhi bhi Academic-tile/Time-Table-link
- * click-through mat karo — ye fragile hai. Sab kuch DIRECT URL/API calls hain:
- * saved session cookies (storageState) automatically access de dete hain.
- *   - Attendance: GET Cyborg_S_Dashboard -> POST GetYearSemWiseAttendance/GetTodayAttendance
- *   - Timetable:  POST FillStudentTimeTable (grid ka own AJAX), fallback page.goto(QUMS_TIMETABLE_URL)
- * Login pe redirect -> SessionExpiredError (looksLikeLoginHtml / throwIfLoginPage).
- *
- * Standalone:
- *   node src/scraper.js               -> prints attendance JSON
- *   node src/scraper.js --timetable   -> also prints parsed timetable JSON
- *   node src/scraper.js --today       -> today's attendance rows
- *   node src/scraper.js --month 9     -> Month Register (backdated) JSON
- * As a module:
- *   const { scrapeAttendance, scrapeTimetable, getTodaySubjects } = require('./scraper')
- *   const { scrapeMonthRegister, getMonthRegister, getTodaysTimetable,
- *           getTimetableForDate } = require('./scraper')
- */
+
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
@@ -106,50 +74,106 @@ async function throwIfLoginPage(page) {
 /** Fetch the dashboard page and pull out the embedded RegID + selected Year/Sem. */
 async function getStudentContext(apiContext) {
   const resp = await apiContext.get(DASHBOARD_URL, { timeout: 60000 });
-  if (!resp.ok()) {
-    throw new ScrapeError(`Dashboard load failed (HTTP ${resp.status()}).`, 'Portal down ho sakta hai — thodi der baad retry karo.');
-  }
-  const html = await resp.text();
-  if (looksLikeLoginHtml(html)) throw new SessionExpiredError();
 
-  const regIdMatch = html.match(/var\s+RegID\s*=\s*'(\d+)'/i);
-  const regId = regIdMatch ? regIdMatch[1] : null;
-  if (!regId) {
+  if (!resp.ok()) {
     throw new ScrapeError(
-      'Dashboard HTML me RegID nahi mila.',
-      'Session expire hoke login pe redirect hua ho sakta hai — Dashboard → QUMS Setup → "Reconnect QUMS" try karo, warna markup badla hai (node src/debug-dump.js chala kar debug-qums-dom.txt share karo).'
+      `Dashboard load failed (HTTP ${resp.status()}).`,
+      'Portal down ho sakta hai — thodi der baad retry karo.'
     );
   }
 
-  // Year/Sem: prefer the <option selected> inside #ddlYearSemAttendance,
-  // then the txtYearSem student-info cell, then QUMS_CURRENT_YEARSEM env
-  // override. Koi static default NAHI (multi-user) — fail hone pe clear error.
+  const html = await resp.text();
+  if (looksLikeLoginHtml(html)) throw new SessionExpiredError();
+
+  // QUMS embeds RegID in the dashboard page.
+  const regIdMatch =
+    html.match(/var\s+RegID\s*=\s*[\'\"](\d+)[\'\"]/i) ||
+    html.match(/\bRegID\s*[:=]\s*[\'\"]?(\d+)[\'\"]?/i);
+
+  const regId = regIdMatch ? regIdMatch[1] : null;
+
+  if (!regId) {
+    throw new ScrapeError(
+      'Dashboard HTML me RegID nahi mila.',
+      'Dashboard → QUMS Setup → Reconnect QUMS try karo.'
+    );
+  }
+
+  // Do not trust txtYearSem / ddlYearSemAttendance from the initial HTML.
+  // QUMS can populate/update these asynchronously. The reliable signal is
+  // the attendance API: the student's active Year/Sem returns real subjects.
+  // Probe all valid values so this works for every student/year without a
+  // global QUMS_CURRENT_YEARSEM setting.
+  const detectedYearSems = [];
   let yearSem = null;
-  const ddlBlock = html.match(/id="ddlYearSemAttendance"[\s\S]{0,4000}?<\/select>/i);
-  if (ddlBlock) {
-    const selected = ddlBlock[0].match(/<option[^>]*selected[^>]*value="(\d+)"/i)
-      || ddlBlock[0].match(/<option[^>]*value="(\d+)"[^>]*selected/i);
-    if (selected) yearSem = selected[1];
-  }
-  if (!yearSem) {
-    const txt = html.match(/id="txtYearSem"[^>]*>([^<]+)</i);
-    if (txt && /^\d+$/.test(txt[1].trim())) yearSem = txt[1].trim();
-  }
-  if (!yearSem) {
-    if (process.env.QUMS_CURRENT_YEARSEM) {
-      yearSem = process.env.QUMS_CURRENT_YEARSEM;
-    } else {
-      // MULTI-USER: koi static semester default NAHI (pehle '5' hardcoded tha —
-      // sirf ek user ke liye sahi tha). Galat semester = galat attendance data,
-      // jo silent-wrong hai. Clear error + actionable hint better hai.
-      throw new ScrapeError(
-        'Year/Sem dashboard HTML se auto-detect nahi hua.',
-        'Dashboard → QUMS Setup → "Reconnect QUMS" try karo (fresh session se detect ho jata hai), ya .env/Render env me QUMS_CURRENT_YEARSEM=<apna semester number> set karo.'
+
+  for (let sem = 1; sem <= 8; sem++) {
+    try {
+      const attendanceResp = await apiContext.post(ATTENDANCE_API, {
+        form: { RegID: regId, YearSem: String(sem) },
+        timeout: 60000,
+      });
+
+      if (!attendanceResp.ok()) continue;
+
+      const raw = await attendanceResp.text();
+      if (!raw || raw.trim().startsWith('<')) continue;
+
+      let payload;
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+
+      let rawRows = [];
+      try {
+        rawRows = typeof payload.data === 'string'
+          ? JSON.parse(payload.data || '[]')
+          : (Array.isArray(payload.data) ? payload.data : []);
+      } catch {
+        rawRows = [];
+      }
+
+      const hasSubjects = Array.isArray(rawRows) && rawRows.some(
+        (row) => row && (norm(row.Subject) || norm(row.SubjectCode))
       );
+
+      if (hasSubjects) {
+        detectedYearSems.push(String(sem));
+        if (!yearSem) yearSem = String(sem);
+      }
+    } catch {
+      // Try the next semester.
     }
   }
 
-  return { regId, yearSem };
+  // Compatibility fallback only if the portal API returned no active semester.
+  // It can never override a working API result.
+  if (!yearSem) {
+    const envSem = String(process.env.QUMS_CURRENT_YEARSEM || '').trim();
+    if (/^[1-8]$/.test(envSem)) yearSem = envSem;
+  }
+
+  if (!yearSem) {
+    throw new ScrapeError(
+      'QUMS se current Year/Sem aur subjects detect nahi hue.',
+      'GetYearSemWiseAttendance ne Sem 1-8 me kisi bhi value par subjects return nahi kiye. QUMS Setup → Reconnect QUMS karke retry karo.'
+    );
+  }
+
+  console.log(
+    `[QUMS] Student context detected: RegID=${regId}, YearSem=${yearSem}` +
+    (detectedYearSems.length > 1
+      ? `, available active Year/Sems=${detectedYearSems.join(',')}`
+      : '')
+  );
+
+  return {
+    regId,
+    yearSem,
+    availableYearSems: detectedYearSems,
+  };
 }
 
 /** Map one API row to the app's subject shape, with EXACT counts attached. */
@@ -198,50 +222,45 @@ async function scrapeAttendance(opts = {}) {
   assertSessionFile(sessionPath);
   const apiContext = await newApiContext(sessionPath);
   try {
-    const { regId, yearSem } = await getStudentContext(apiContext);
+    const { regId, yearSem, availableYearSems } = await getStudentContext(apiContext);
+    const candidates = [yearSem, ...(availableYearSems || []).filter((v) => v !== yearSem)];
+    let payload = null;
+    let usedYearSem = yearSem;
 
-    const resp = await apiContext.post(ATTENDANCE_API, {
-      form: { RegID: regId, YearSem: yearSem },
-      timeout: 60000,
-    });
-    if (!resp.ok()) {
+    for (const candidate of candidates) {
+      const resp = await apiContext.post(ATTENDANCE_API, {
+        form: { RegID: regId, YearSem: candidate },
+        timeout: 60000,
+      });
+      if (!resp.ok()) continue;
+      try {
+        const p = await resp.json();
+        const rowsText = typeof p.data === 'string' ? p.data.trim() : '';
+        if (!rowsText) continue;
+        const rawRows = JSON.parse(rowsText);
+        if (Array.isArray(rawRows) && rawRows.some((r) => r && (r.Subject || r.SubjectCode))) {
+          payload = p;
+          usedYearSem = candidate;
+          break;
+        }
+      } catch { }
+    }
+
+    if (!payload) {
       throw new ScrapeError(
-        `Attendance API failed (HTTP ${resp.status()}).`,
-        'Portal down ya session issue — thodi der baad retry, ya Dashboard → QUMS Setup → Reconnect QUMS.'
+        `Attendance API returned no subjects (tried Year/Sem: ${candidates.join(', ')}).`,
+        'QUMS ne valid subjects return nahi kiye. Reconnect QUMS karke retry karo.'
       );
     }
-    let payload;
-    try {
-      payload = await resp.json();
-    } catch {
-      throw new SessionExpiredError(); // login pages respond with HTML here too
-    }
-    if (typeof payload.data !== 'string' || payload.data === '') {
-      throw new ScrapeError(
-        `Attendance API returned no data (YearSem=${yearSem}).`,
-        `Semester galat lag sakta hai — .env me QUMS_CURRENT_YEARSEM set karke retry karo.`
-      );
-    }
+
     const rows = JSON.parse(payload.data).map(mapAttendanceRow).filter((r) => r.subject);
-    if (!rows.length) {
-      throw new ScrapeError(
-        'Attendance API returned an empty subject list.',
-        'Semester galat lag sakta hai — .env me QUMS_CURRENT_YEARSEM set karke retry karo.'
-      );
-    }
+    if (!rows.length) throw new ScrapeError(`Attendance API returned an empty subject list (YearSem=${usedYearSem}).`, 'Reconnect QUMS karke retry karo.');
 
-    // Overall summary (state JSON): { DateFrom, DateTo, TotalPercentage, ... }
     let summary = null;
     try {
       const st = JSON.parse(payload.state || '[]')[0];
-      if (st) {
-        summary = {
-          dateFrom: norm(st.DateFrom),
-          dateTo: norm(st.DateTo),
-          overallPercentage: Number(st.TotalPercentage) || null,
-        };
-      }
-    } catch {}
+      if (st) summary = { dateFrom: norm(st.DateFrom), dateTo: norm(st.DateTo), overallPercentage: Number(st.TotalPercentage) || null };
+    } catch { }
 
     return rows.map((r) => ({ ...r, periodSummary: summary }));
   } finally {
@@ -649,7 +668,7 @@ async function scrapeTimetable(opts = {}) {
         await page.goto(TIMETABLE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
         try {
           await page.waitForLoadState('networkidle', { timeout: 15000 });
-        } catch {}
+        } catch { }
         // Direct-URL navigation: page.goto se session cookies kaam karte hain,
         // koi Academic-tile/Time-Table-link click nahi. Login pe redirect ->
         // throwIfLoginPage clear SessionExpiredError deta hai (3 signals).
@@ -661,11 +680,11 @@ async function scrapeTimetable(opts = {}) {
             () => /monday|tuesday|wednesday|thursday|thrusday|friday|saturday|sunday/i.test(document.body ? document.body.innerText : ''),
             { timeout: 20000 }
           )
-          .catch(() => {});
+          .catch(() => { });
         await page.waitForTimeout(2000);
         timetable = await page.evaluate(parseTimetableInPage);
       } finally {
-        await page.close().catch(() => {});
+        await page.close().catch(() => { });
       }
     }
     if (!timetable) {
@@ -795,7 +814,7 @@ async function scrapeMonthRegister(opts = {}) {
           percentage: String(s.Percet || '').trim() || null,
         };
       }
-    } catch {}
+    } catch { }
     const records = expandMonthRegisterRows(rawRows, { year, month });
     return { year, month, records, summary };
   } finally {
@@ -890,7 +909,7 @@ async function getTodaysScheduleWithRoom(userId) {
   }
   const merged = mergeScheduleWithRoom(todaysRows, timetablePeriods);
   const dow = new Date().getDay();
-  db.upsertWeeklySchedule(
+  await db.upsertWeeklySchedule(
     userId,
     dow,
     merged.map((r) => ({

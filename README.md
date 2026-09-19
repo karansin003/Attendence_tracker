@@ -87,8 +87,9 @@ cp .env.example .env
 #  ENCRYPTION_KEY=   node -e "console.log(require('crypto').randomBytes(24).toString('base64'))"
 #  SESSION_SECRET=   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 #  APP_BASE_URL=     public URL (forgot-password reset links ke liye)
-#  (optional) SMTP_* — forgot-password emails; bina iske reset link server
-#                     console me print hota hai
+#  RESEND_API_KEY=   resend.com API key (forgot-password emails — RECOMMENDED)
+#  (optional) SMTP_* — email fallback jab RESEND_API_KEY na ho; bina dono ke
+#                     reset link server console me print hota hai
 
 npm start                 # http://localhost:3000
 ```
@@ -112,13 +113,23 @@ Teacher: ANKUR JAIN
 ```
 
 **Kaise kaam karta hai** (`src/watcher.js`): QUMS pe webhook/push nahi hai, isliye
-watcher **"Today's Attendance" API ko poll** karta hai — har
-`WATCH_INTERVAL_MINUTES` (default 5 min), sirf **college hours (08:30–17:00 IST)** me.
-Period jab tak "N.M." (Not Marked) hai ignore hota hai; jaise hi P/A/Presence-type
-value aati hai aur wo pehli baar dikha hai, ek message bhej deta hai. Duplicate
-protection: `data/notified_periods.json` me `{ "2026-09-11": ["P2-MT3015", ...] }`
-store hota hai — ek period pe sirf ek hi message kabhi jaayega (send se *pehle*
-state mark hoti hai, fail hone pe rollback — crash pe bhi duplicate nahi hoga).
+watcher **"Today's Attendance" API ko poll** karta hai — ye **near-real-time**
+monitoring hai (webhook nahi, polling): har `WATCH_INTERVAL_MINUTES` (default
+2 min), sirf **college hours (08:30–17:00 IST)** me. Period jab tak "N.M." (Not
+Marked) hai ignore hota hai; jaise hi P/A/Presence-type value aati hai aur wo
+pehli baar dikha hai, ek message bhej deta hai. Duplicate protection: **per-user**
+state file `data/notified_periods/<userId>.json` me
+`{ "2026-09-11": ["P2-CS30201:present", ...] }` store hota hai (event key =
+period + subjectCode + **status**) — ek period pe sirf ek hi message kabhi
+jaayega (send se *pehle* state mark hoti hai, fail hone pe rollback — crash pe
+bhi duplicate nahi hoga).
+
+**User isolation (15A–15K):** har user ka QUMS attendance USKE apne session se
+fetch hota hai aur update SIRF uske apne Telegram `chatId` pe jaata hai
+(`users.telegramChatId`, deep-link se linked). Koi global/hardcoded chatId nahi
+hai; user A ka notification state user B ko kabhi suppress nahi karta (alag
+per-user state files). `npm test` is isolation ko automated multi-user tests
+(Tests A–D: per-user delivery + dedupe + restart persistence) se verify karta hai.
 
 Commands:
 
@@ -128,6 +139,7 @@ node src/watcher.js --test --send    # simulation + REAL Telegram send
 node src/watcher.js --now            # ek real cycle abhi (hours check ke saath)
 node src/watcher.js --now --force    # ek real cycle abhi, hours check bypass
 node src/scraper.js --today          # aaj ke periods ka raw JSON (debug)
+node test/multiuser.test.js          # multi-user Telegram isolation tests (A–D)
 ```
 
 Server chalte hue dashboard ke saath watcher bhi armed hota hai. Debugging ke liye
@@ -294,11 +306,14 @@ SESSION_SECRET=<tumhara session secret — dekho .env.example>
 TELEGRAM_BOT_TOKEN=<Render secret — BotFather ka token>
 TELEGRAM_BOT_USERNAME=qums_attendance_bot
 # Recommended (warna production me password-reset email deliver nahi hoga):
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=<email>
-SMTP_PASS=<app password>
-SMTP_FROM=<email>
+RESEND_API_KEY=<resend.com → API Keys → Create API Key>
+# RESEND_FROM=QUMS Attendance Bot <noreply@yourdomain.com>   # verified domain chahiye
+# SMTP fallback (sirf tab jab RESEND_API_KEY na ho):
+# SMTP_HOST=smtp.gmail.com
+# SMTP_PORT=587
+# SMTP_USER=<email>
+# SMTP_PASS=<app password>
+# SMTP_FROM=<email>
 # Optional tuning:
 # WATCH_INTERVAL_MINUTES=5
 # MONTH_REGISTER_INTERVAL_MINUTES=10
@@ -319,13 +334,19 @@ SMTP_FROM=<email>
 ### 3. Password reset configuration
 
 - Forgot-password par token banta hai (SHA-256 hashed DB me, 1 hour expiry, single-use).
-- Reset link: `${APP_BASE_URL}/reset?token=<TOKEN>` — SMTP configured ho to email jaata hai.
-- **Email pe link ke liye SMTP zaroori hai** (e.g. Gmail: `SMTP_HOST=smtp.gmail.com`,
-  `SMTP_PORT=587`, `SMTP_USER`/`SMTP_PASS` = **Gmail App Password** — normal password
-  nahi chalega, https://myaccount.google.com/apppasswords se banao).
-- **SMTP production me recommended hai**: bina SMTP ke link kisi ko deliver nahi
-  hoga, aur security ke liye production logs me token/link print NAHI hota
-  (local dev me console fallback chalta hai).
+- Reset link: `${APP_BASE_URL}/reset?token=<TOKEN>` — email provider configured ho to email jaata hai.
+- **Email delivery (`src/mailer.js`) — priority order:**
+  1. **Resend (recommended)**: `.env` me `RESEND_API_KEY` (resend.com → API Keys →
+     "Create API Key"). Free tier me default from (`onboarding@resend.dev`) se mail
+     sirf APNE khud ke Resend-account email pe jaata hai; production ke liye Resend
+     dashboard → Domains me apna domain verify karke `RESEND_FROM=QUMS Attendance
+     Bot <noreply@yourdomain.com>` set karo.
+  2. **SMTP fallback** (sirf jab `RESEND_API_KEY` na ho): e.g. Gmail —
+     `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USER`/`SMTP_PASS` =
+     **Gmail App Password** (normal password nahi chalega,
+     https://myaccount.google.com/apppasswords se banao).
+  3. **Local dev console**: bina dono ke link console me print hota hai (sirf
+     non-production; production logs me token/link KABHI print nahi hota).
 - Reset page `/reset?token=...` token pre-fill karke `/api/reset` ko POST karta hai.
 
 ### 4. Health endpoint

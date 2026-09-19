@@ -1,22 +1,3 @@
-/**
- * Telegram module — node-telegram-bot-api, POLLING mode (koi public webhook
- * URL nahi chahiye). Ye purane WhatsApp (whatsapp-web.js) channel ko poori
- * tarah replace karta hai.
- *
- * Setup (ek baar):
- *   1. BotFather se bot token -> .env: TELEGRAM_BOT_TOKEN=123:ABC...
- *   2. User dashboard pe "Connect Telegram" button (DEEP-LINK) click karta hai:
- *        https://t.me/<BOT_USERNAME>?start=<linkCode>
- *      Telegram khud "/start <linkCode>" bhej deta hai -> hum us user ka
- *      telegramChatId DB me save kar dete hain. Koi manual code typing nahi.
- *   3. Backup: user /link <linkCode> bhi type kar sakta hai.
- *
- * Har registered user ke paas unique telegramLinkCode hota hai (dashboard se
- * generate/view hota hai); linked hone ke baad sends uske chatId pe jaate hain.
- *
- * Standalone check (token valid? kaun linked hai?):
- *   npm run telegram-test
- */
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const db = require('./db');
@@ -60,28 +41,40 @@ function toTelegramHtml(text) {
  * Per-user send: user ka saved telegramChatId nikal ke message bhejo.
  * Not linked / not configured -> silently skip (false), koi crash nahi.
  * HTML parse fail (rare) -> plain-text fallback.
+ *
+ * 15I — safe logs: sirf booleans + userId. TELEGRAM_BOT_TOKEN / chatId /
+ * connection token KABHI log nahi hota.
  */
-async function sendMessage(userId, text) {
+async function sendMessage(userId, text, log = console) {
   if (!userId) return false;
-  const user = db.getUserById(userId);
+  const user = await db.getUserById(userId);
+  log.log(`[Telegram] Chat ID available: ${Boolean(user && user.telegramChatId)}`); // boolean only — chatId log NAHI
   if (!user || !user.telegramChatId) return false; // Telegram linked nahi hai
   // Standalone processes (scheduler --now, watcher --send) me polling init
   // nahi hota — send-only bot bana lo (koi getUpdates nahi, 409 conflict nahi).
   if (!bot) {
-    if (!isConfigured()) return false;
+    if (!isConfigured()) {
+      log.log('[Telegram] Telegram connected: false (TELEGRAM_BOT_TOKEN missing) — send skip.');
+      return false;
+    }
     bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
   }
+  log.log('[Telegram] Telegram connected: true');
   try {
+    log.log(`[Telegram] Sending notification for user: ${userId}`);
     await bot.sendMessage(user.telegramChatId, toTelegramHtml(text), {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     });
+    log.log(`[Telegram] Notification sent successfully for user: ${userId}`);
     return true;
   } catch (err) {
     try {
       await bot.sendMessage(user.telegramChatId, text); // plain-text fallback
+      log.log(`[Telegram] Notification sent successfully for user: ${userId} (plain-text fallback)`);
       return true;
-    } catch {
+    } catch (err2) {
+      log.error(`[Telegram] Notification FAILED for user: ${userId}: ${err.message}`);
       throw err; // watcher/scheduler rollback-retry kar sake
     }
   }
@@ -90,9 +83,9 @@ async function sendMessage(userId, text) {
 // ---- linking handlers (deep-link primary, /link backup, /status info) ----
 
 /** "/start <linkCode>" — deep-link flow ka core. Returns linked user ya null. */
-function handleDeepLink(chatId, payload, log = console) {
+async function handleDeepLink(chatId, payload, log = console) {
   const code = String(payload || '').trim();
-  const user = code ? db.getUserByTelegramLinkCode(code) : null;
+  const user = code ? await db.getUserByTelegramLinkCode(code) : null;
   if (!user) {
     bot.sendMessage(chatId, '❌ Ye link invalid ya expire ho gaya hai. Dashboard kholke dobara "Connect Telegram" dabao.');
     return null;
@@ -100,33 +93,37 @@ function handleDeepLink(chatId, payload, log = console) {
   // PRIVACY: ek chat sirf EK account ke updates ke liye — agar ye chat pehle
   // kisi aur account se linked thi to wo binding ab clear (us user ke updates
   // is chat pe aana band).
-  const previousOwnerCleared = db.clearTelegramChatForChat(chatId, user.id);
-  db.setTelegramChatId(user.id, chatId);
+  const previousOwnerCleared = await db.clearTelegramChatForChat(chatId, user.id);
+  await db.setTelegramChatId(user.id, chatId);
   const rebindNote = previousOwnerCleared ? '\n(Note: ye chat pehle kisi aur account se linked thi — ab sirf is account ke updates aayenge.)' : '';
-  bot.sendMessage(chatId, `✅ Connected! Ab aapko attendance updates yahin milenge (${user.email}).${rebindNote}`);
+  // bot.sendMessage(chatId, `✅ Connected! Ab aapko attendance updates yahin milenge (${user.email}).${rebindNote}`);
+  bot.sendMessage(
+    chatId,
+    `✅ Connected! Ab aapko attendance updates yahin milenge (${user?.email || 'your account'}).${rebindNote}`
+  );
   log.log(`[telegram] 🔗 linked: ${user.email} -> chat ${chatId}${previousOwnerCleared ? ` (rebind: ${previousOwnerCleared} purana binding clear)` : ''}`);
   return user;
 }
 
-function handleStart(chatId, payload, log = console) {
+async function handleStart(chatId, payload, log = console) {
   if (!payload) {
     bot.sendMessage(chatId, "👋 Welcome! QUMS Attendance Bot. Dashboard kholo aur 'Connect Telegram' button dabao — bas itna hi.");
     return;
   }
-  handleDeepLink(chatId, payload, log);
+  await handleDeepLink(chatId, payload, log);
 }
 
 /** Backup command: "/link <linkCode>" */
-function handleLinkCommand(chatId, code, log = console) {
+async function handleLinkCommand(chatId, code, log = console) {
   if (!code) {
     bot.sendMessage(chatId, 'Usage: /link <code>  — code dashboard ke "Connect Telegram" section me hai.');
     return;
   }
-  handleDeepLink(chatId, code, log);
+  await handleDeepLink(chatId, code, log);
 }
 
-function handleStatus(chatId, log = console) {
-  const user = db.getUserByTelegramChatId(chatId);
+async function handleStatus(chatId, log = console) {
+  const user = await db.getUserByTelegramChatId(chatId);
   if (user) {
     bot.sendMessage(chatId, `🔗 Linked: ${user.email}\nQUMS: ${user.qumsSessionPath ? 'configured ✅' : 'setup pending ⚠️'}`);
   } else {
@@ -146,13 +143,13 @@ function initTelegram(log = console) {
   bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
   bot.on('polling_error', (err) => log.error(`[telegram] polling error: ${err.message}`));
   bot.onText(/^\/start(?:\s+(\S+))?/, (msg, match) => {
-    try { handleStart(msg.chat.id, match && match[1], log); } catch (e) { log.error(`[telegram] /start failed: ${e.message}`); }
+    handleStart(msg.chat.id, match && match[1], log).catch((e) => log.error(`[telegram] /start failed: ${e.message}`));
   });
   bot.onText(/^\/link(?:\s+(\S+))?/, (msg, match) => {
-    try { handleLinkCommand(msg.chat.id, match && match[1], log); } catch (e) { log.error(`[telegram] /link failed: ${e.message}`); }
+    handleLinkCommand(msg.chat.id, match && match[1], log).catch((e) => log.error(`[telegram] /link failed: ${e.message}`));
   });
   bot.onText(/^\/status/, (msg) => {
-    try { handleStatus(msg.chat.id, log); } catch (e) { log.error(`[telegram] /status failed: ${e.message}`); }
+    handleStatus(msg.chat.id, log).catch((e) => log.error(`[telegram] /status failed: ${e.message}`));
   });
   log.log(`[telegram] polling armed (@${BOT_USERNAME}) — deep-link + /link + /status handlers active.`);
   return bot;
@@ -165,10 +162,10 @@ function initTelegram(log = console) {
  *   'not-linked'           -> user ne Connect Telegram nahi kiya
  *   null                   -> send block nahi hoga
  */
-function sendBlockerReason(userId) {
+async function sendBlockerReason(userId) {
   if (!isConfigured()) return 'not-configured';
   if (!bot) return 'bot-not-initialized';
-  const user = userId ? db.getUserById(userId) : null;
+  const user = userId ? await db.getUserById(userId) : null;
   if (!user || !user.telegramChatId) return 'not-linked';
   return null;
 }
@@ -204,7 +201,7 @@ if (require.main === module) {
       console.error('[x] Token INVALID:', err.message);
       process.exit(1);
     }
-    const linked = db.allUsers().filter((u) => u.telegramChatId);
+    const linked = (await db.allUsers()).filter((u) => u.telegramChatId);
     console.log(`Linked users: ${linked.length}`);
     linked.forEach((u) => console.log(`  - ${u.email} -> chat ${u.telegramChatId}`));
     process.exit(0);

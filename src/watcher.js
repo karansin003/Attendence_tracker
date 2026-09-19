@@ -12,7 +12,11 @@
  *     on first sighting the user gets a Telegram alert (teacher + subject +
  *     period + date + marked-you-as), sent TO THE USER'S OWN Telegram chat
  *   - per-user dedupe state: data/notified_periods/<userId>.json
+ *     (event key = period + subjectCode + STATUS — `P2-CS30201:present`;
+ *      userId scoping file se aata hai, date scope file ke andar `state[date]` se)
  *     -> duplicates NEVER go out (state marked BEFORE send; rollback on failure)
+ *     -> legacy keys (`P2-CS30201`, bina status) bhi suppress karte hain —
+ *        upgrade/restart ke baad koi duplicate alert NAHI (Test D safe)
  *
  * 2) MONTH REGISTER (backdated loop):
  *   - every MONTH_REGISTER_INTERVAL_MINUTES (default 10 — user ko near-real-time
@@ -68,6 +72,18 @@ const COLLEGE_END_HOUR = 17; // 17:00 IST
 
 function stateFileFor(userId) {
   return path.join(PER_USER_STATE_DIR, `${userId}.json`);
+}
+
+/**
+ * 15D — user-scoped ATTENDANCE EVENT key (fast loop).
+ * userId scoping: har user ka APNA state file (data/notified_periods/<userId>.json)
+ * — kabhi koi global map nahi. Event identity: period + subjectCode + STATUS,
+ * e.g. `P2-CS30201:present` vs `P2-CS30201:absent` = alag events (N.M.->P aur
+ * P->A status-correction dono "attendance change" hain). Date scope state file
+ * ke andar `state[date]` se aata hai.
+ */
+function eventKeyFor(row) {
+  return `${row.key}:${row.status || 'marked'}`;
 }
 
 /** Current IST time parts: { date 'YYYY-MM-DD', hourDecimal, hhmm } */
@@ -137,14 +153,21 @@ function roomMapFromPeriods(periods) {
   return map;
 }
 
-/** Pure: which rows need a notification? (marked + not already notified + deduped in-batch) */
+/**
+ * Pure: which rows need a notification? (marked + not already notified + deduped in-batch)
+ * 15D/15E: event key me STATUS bhi hai. Purane state files ke LEGACY keys
+ * (`P2-CS30201`, bina status) bhi suppress karte hain — server restart/upgrade
+ * ke baad already-notified period ka duplicate alert KABHI nahi jaayega.
+ */
 function pendingNotifications(rows, notifiedKeys) {
   const seen = new Set(notifiedKeys || []);
   const out = [];
   for (const row of rows || []) {
     if (!row || row.status === 'unmarked') continue;
-    if (!row.key || seen.has(row.key)) continue;
-    seen.add(row.key); // also dedupes duplicates inside one fetch
+    if (!row.key) continue;
+    const eventKey = eventKeyFor(row);
+    if (seen.has(eventKey) || seen.has(row.key)) continue; // row.key = legacy key (bina status)
+    seen.add(eventKey); // also dedupes duplicates inside one fetch
     out.push(row);
   }
   return out;
@@ -189,6 +212,9 @@ async function runWatcherCycle(opts = {}) {
   const state = loadState(stateFile);
   const notified = state[now.date] || [];
   const pending = pendingNotifications(rows, notified);
+  if (pending.length) {
+    log.log(`[Watcher] Attendance change detected for user: ${opts.userId || '?'}`);
+  }
 
   log.log(
     `[watcher] ${now.hhmm} IST${opts.userEmail ? ` (${opts.userEmail})` : ''} — ${rows.length} periods aaj, ${pending.length} naye marked.`
@@ -197,21 +223,23 @@ async function runWatcherCycle(opts = {}) {
   const sent = [];
   for (const row of pending) {
     const text = buildUpdateMessage(row);
+    const eventKey = eventKeyFor(row);
     // Mark as notified BEFORE sending — guarantees no duplicates even if the
     // process dies mid-send. On failure we roll back so the next cycle retries.
-    notified.push(row.key);
+    notified.push(eventKey);
     state[now.date] = notified;
     saveState(state, stateFile);
     try {
       if (opts.dryRun) {
         log.log(`[watcher] (dry-run) would send to ${opts.userEmail || 'user'}:\n${text}\n`);
       } else {
+        log.log(`[Telegram] Sending attendance notification for user: ${opts.userId || '?'}`);
         await sendFn(text);
         log.log(`[watcher] 📲 sent: ${row.key} (${row.status}) — ${row.subject}`);
       }
       sent.push({ key: row.key, status: row.status, subject: row.subject });
     } catch (err) {
-      state[now.date] = (state[now.date] || []).filter((k) => k !== row.key);
+      state[now.date] = (state[now.date] || []).filter((k) => k !== eventKey);
       saveState(state, stateFile);
       log.error(`[watcher] send FAILED for ${row.key}: ${err.message} — next cycle me retry hoga`);
     }
@@ -222,7 +250,7 @@ async function runWatcherCycle(opts = {}) {
 
 /** One full watcher pass over ALL users with a linked QUMS session. */
 async function runWatcherPass(log = console) {
-  const users = db.allUsers().filter((u) => u.qumsSessionPath);
+  const users = (await db.allUsers()).filter((u) => u.qumsSessionPath);
   if (!users.length) {
     log.log('[watcher] koi user ka QUMS session linked nahi — pass skip.');
     return { users: 0 };
@@ -230,6 +258,7 @@ async function runWatcherPass(log = console) {
   log.log(`[watcher] pass started for ${users.length} user(s)...`);
   const results = [];
   for (const user of users) {
+    log.log(`[Watcher] Checking user: ${user.id}`); // 15C/15I — userId POORE loop me carry hota hai
     try {
       // eslint-disable-next-line no-await-in-loop
       // eslint-disable-next-line no-await-in-loop
@@ -312,7 +341,7 @@ async function runMonthRegisterCycle(opts = {}) {
   }
 
   const records = (result.records || []).filter((r) => r.status !== 'unmarked');
-  const known = db.listKnownAttendance(userId);
+  const known = await db.listKnownAttendance(userId);
   let pending = pendingMonthNotifications(records, known);
 
   // Dup-alert guard: college hours ke ANDAR aaj ke marks FAST loop (5 min)
@@ -323,7 +352,11 @@ async function runMonthRegisterCycle(opts = {}) {
   const todayIst = istNow();
   const inHours = isWithinCollegeHours(todayIst.hourDecimal);
   const fastNotifiedCodes = new Set(
-    (loadState(stateFileFor(userId))[todayIst.date] || []).map((k) => k.split('-').slice(1).join('-'))
+    (loadState(stateFileFor(userId))[todayIst.date] || []).map(
+      // fast-loop event key ab `P2-CODE:status` format me hai — cross-check ke
+      // liye sirf subjectCode chahiye (legacy keys me :status nahi hota, no-op)
+      (k) => k.split('-').slice(1).join('-').split(':')[0]
+    )
   );
   pending = pending.filter((rec) => {
     if (rec.date !== todayIst.date) return true; // backdated — hamesha eligible
@@ -335,6 +368,10 @@ async function runMonthRegisterCycle(opts = {}) {
   // cycle me mahine bhar ke purane marks ki alert-storm chali jayegi.
   const bootstrap = !known.length && records.length > 0;
   if (bootstrap) pending = [];
+
+  if (pending.length) {
+    log.log(`[Watcher] Attendance change detected for user: ${userId}`);
+  }
 
   log.log(
     `[watcher] month-register ${result.year}-${String(result.month).padStart(2, '0')}${opts.userEmail ? ` (${opts.userEmail})` : ''} — ${records.length} marked records, ${pending.length} naye${bootstrap ? ' (BOOTSTRAP seed, koi alert nahi)' : ''}.`
@@ -358,7 +395,7 @@ async function runMonthRegisterCycle(opts = {}) {
   for (const rec of pending) {
     const text = buildBackdatedMessage(rec);
     // Mark-before-send: duplicates IMPOSSIBLE even if the process dies mid-send.
-    db.addKnownAttendance(userId, [rec]);
+    await db.addKnownAttendance(userId, [rec]);
     try {
       if (opts.dryRun) {
         log.log(`[watcher] (dry-run) would send to ${opts.userEmail || 'user'}:\n${text}\n`);
@@ -368,12 +405,12 @@ async function runMonthRegisterCycle(opts = {}) {
       }
       sent.push({ key: rec.key, status: rec.status, date: rec.date, subjectCode: rec.subjectCode });
     } catch (err) {
-      db.removeKnownAttendance(userId, rec.key); // rollback — next cycle retry
+      await db.removeKnownAttendance(userId, rec.key); // rollback — next cycle retry
       log.error(`[watcher] send FAILED for ${rec.key}: ${err.message} — next cycle me retry hoga`);
     }
   }
 
-  if (bootstrap) db.addKnownAttendance(userId, records);
+  if (bootstrap) await db.addKnownAttendance(userId, records);
 
   return { skipped: false, bootstrap, year: result.year, month: result.month, totalMarked: records.length, notified: sent };
 }
@@ -390,7 +427,7 @@ async function runMonthRegisterCycle(opts = {}) {
  * seed hota hai — wahi correct behaviour hai).
  */
 async function runBaselineForUser(userId, log = console) {
-  const user = db.getUserById(userId);
+  const user = await db.getUserById(userId);
   if (!user || !user.qumsSessionPath) {
     return { skipped: true, reason: 'qums-session-missing' };
   }
@@ -402,8 +439,11 @@ async function runBaselineForUser(userId, log = console) {
   const todayKeys = state[now.date] || [];
   let seededFast = 0;
   for (const r of marked) {
-    if (!todayKeys.includes(r.key)) {
-      todayKeys.push(r.key);
+    // eventKey (status ke saath) seed karo; legacy key pehle se ho to bhi seed
+    // (dono formats suppress karte hain — koi duplicate alert nahi)
+    const eventKey = eventKeyFor(r);
+    if (!todayKeys.includes(eventKey) && !todayKeys.includes(r.key)) {
+      todayKeys.push(eventKey);
       seededFast += 1;
     }
   }
@@ -418,7 +458,7 @@ async function runBaselineForUser(userId, log = console) {
 
 /** One full month-register pass over ALL users with a linked QUMS session. */
 async function runMonthRegisterPass(log = console, opts = {}) {
-  const users = db.allUsers().filter((u) => u.qumsSessionPath);
+  const users = (await db.allUsers()).filter((u) => u.qumsSessionPath);
   if (!users.length) {
     log.log('[watcher] month-register: koi user ka QUMS session linked nahi — pass skip.');
     return { users: 0 };
@@ -426,6 +466,7 @@ async function runMonthRegisterPass(log = console, opts = {}) {
   log.log(`[watcher] month-register pass started for ${users.length} user(s)...`);
   const results = [];
   for (const user of users) {
+    log.log(`[Watcher] Checking user: ${user.id}`); // 15C/15I — userId POORE loop me carry hota hai
     try {
       // eslint-disable-next-line no-await-in-loop
       const r = await runMonthRegisterCycle({
@@ -516,24 +557,38 @@ if (require.main === module) {
         pollCount += 1;
         if (pollCount >= 2) virtual[1].Attend = 'P'; // teacher marks P2 after cycle 1
         // map exactly like the real scraper does (row -> {status, key, ...})
-        return virtual.map((r) => ({
-          period: r.Period,
-          duration: r.Duration,
-          subject: r.subject,
-          subjectCode: r.SubjectCode,
-          employee: r.Employeename,
-          attendance: r.Attend,
-          status: r.Attend.replace(/\./g, '').toUpperCase().includes('P') ? 'present' : r.Attend.replace(/\./g, '').toUpperCase().includes('A') ? 'absent' : r.Attend.trim() ? 'other' : 'unmarked',
-          key: `${r.Period}-${r.SubjectCode}`,
-        }));
+        return virtual.map((r) => {
+          const raw = String(r.Attend || '').trim();
+          return {
+            period: r.Period,
+            duration: r.Duration,
+            subject: r.subject,
+            subjectCode: r.SubjectCode,
+            employee: r.Employeename,
+            attendance: r.Attend,
+            // N.M./empty -> 'unmarked' (koi alert nahi), P*/PRESENT -> present, A*/ABSENT -> absent
+            status: !raw || raw.toUpperCase() === 'N.M.' ? 'unmarked' : raw.toUpperCase().includes('P') ? 'present' : raw.toUpperCase().includes('A') ? 'absent' : 'other',
+            key: `${r.Period}-${r.SubjectCode}`,
+          };
+        });
       };
       const sendFn = async (text) => {
         if (!realSend) {
           console.log(`[watcher] (dry-run) would send:\n${text}\n`);
           return text;
         }
-        const realUser = db.allUsers().find((u) => u.telegramChatId) || db.allUsers()[0];
+        // 15J NOTE — TEST-ONLY target: ye SIMULATED data hai (kisi real user ka
+        // QUMS attendance NAHI), isliye manual-testing convenience ke liye
+        // deterministic pehla linked user use hota hai. REAL watcher pass
+        // (runWatcherPass / runMonthRegisterPass) me aisa koi global pick NAHI
+        // hai — har alert uske apne userId -> telegramChatId pe hi jaata hai.
+        const linked = db
+          .allUsers()
+          .filter((u) => u.telegramChatId)
+          .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+        const realUser = linked[0] || (await db.allUsers())[0];
         if (!realUser) throw new Error('Koi registered user nahi — pehle /register karo.');
+        console.log(`[watcher] (TEST) simulated alert -> test target user: ${realUser.email} (test-only, real loop me aisa nahi)`);
         return sendMessage(realUser.id, text);
       };
 
@@ -556,7 +611,7 @@ if (require.main === module) {
 
     // ---- month-register: simulation (--month-test) / one real pass (--month-now) ----
     if (args.includes('--month-test')) {
-      const users = db.allUsers().filter((u) => u.qumsSessionPath);
+      const users = (await db.allUsers()).filter((u) => u.qumsSessionPath);
       if (!users.length) {
         console.error('[x] koi registered user with QUMS session nahi — pehle web dashboard se QUMS link karo.');
         process.exit(1);
@@ -642,6 +697,7 @@ module.exports = {
   runBaselineForUser,
   pendingNotifications,
   pendingMonthNotifications,
+  eventKeyFor,
   buildUpdateMessage,
   buildBackdatedMessage,
   MONTH_REGISTER_INTERVAL_MINUTES,

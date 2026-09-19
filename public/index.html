@@ -41,12 +41,14 @@
 
       <div id="errorBox" class="form-error hidden"></div>
 
-      <table id="table" hidden>
-        <thead>
-          <tr><th>Subject</th><th>Code</th><th>Attended</th><th>%</th><th>Status</th><th>Guidance</th></tr>
-        </thead>
-        <tbody id="tbody"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table id="table" hidden>
+          <thead>
+            <tr><th>Subject</th><th>Code</th><th>Attended</th><th>%</th><th>Status</th><th>Guidance</th></tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
     </div>
 
     <div class="card">
@@ -56,7 +58,8 @@
         <button class="accent" id="testSummaryBtn">🌙 Attendance Summary (9 PM wala)</button>
         <button id="refreshScheduleBtn">🔄 Refresh my schedule (force)</button>
       </div>
-      <div class="form-hint">Roz subah 8:30 AM schedule + raat 9 PM summary + watcher alerts automatically aate hain. "Refresh my schedule" weekly cache ko force-refresh karta hai (semester me schedule badle to).</div>
+      <!-- <div class="form-hint">Roz subah 8:30 AM schedule + raat 9 PM summary + watcher alerts automatically aate hain. "Refresh my schedule" weekly cache ko force-refresh karta hai (semester me schedule badle to).</div> -->
+    <br>
       <div class="row" style="align-items: center;">
         <span id="tgState" class="sub">Telegram status…</span>
         <button id="tgUnlinkBtn" class="hidden">Disconnect</button>

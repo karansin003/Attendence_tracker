@@ -28,13 +28,13 @@ const TIMEZONE = 'Asia/Kolkata';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function activeUsers() {
-  return db.allUsers().filter((u) => u.qumsSessionPath);
+async function activeUsers() {
+  return (await db.allUsers()).filter((u) => u.qumsSessionPath);
 }
 
 /** Roz 21:00 — per-user attendance summary + 75% guidance. */
 async function runDailySummaryJob(log = console) {
-  const users = activeUsers();
+  const users = await activeUsers();
   log.log(`[scheduler] 9 PM summary started for ${users.length} user(s).`);
   let ok = 0;
   for (const user of users) {
@@ -72,7 +72,7 @@ async function runDailySummaryJob(log = console) {
 async function getMorningScheduleText(user, { forceRefresh = false, log = console } = {}) {
   const dow = new Date().getDay();
   if (!forceRefresh) {
-    const cached = db.getWeeklySchedule(user.id, dow);
+    const cached = await db.getWeeklySchedule(user.id, dow);
     if (cached.fresh) {
       log.log(`[scheduler] ${user.email}: weekly cache HIT (dow=${dow}, ${cached.rows.length} periods) — live scrape skip.`);
       return {
@@ -91,7 +91,7 @@ async function getMorningScheduleText(user, { forceRefresh = false, log = consol
 
 /** Roz 08:30 — per-user aaj ki classes (subah 8:30 baje: kon si class, kis time, kaunse room). */
 async function runMorningScheduleJob(log = console) {
-  const users = activeUsers();
+  const users = await activeUsers();
   log.log(`[scheduler] 8:30 AM morning schedule started for ${users.length} user(s).`);
   let ok = 0;
   for (const user of users) {

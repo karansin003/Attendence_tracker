@@ -1,23 +1,4 @@
-/**
- * Express server — MULTI-USER QUMS Attendance Bot (Phase 2).
- *
- * Public pages:     /login  /register  /forgot  /reset
- * Protected pages:  /dashboard  /qums-setup
- * Public APIs:      /health  /api/register  /api/login  /api/forgot  /api/reset
- * Protected APIs:   /api/me  /api/attendance  /api/today  /api/trigger-telegram
- *                   /api/telegram/status  /api/telegram/unlink
- *                   /api/qums-login/start  /api/qums-login/submit-captcha  /api/logout
- *
- * Auth: express-session (90-din cookie, file store — restart pe bhi persist),
- * bcrypt password hashes, QUMS password AES-256-GCM encrypted at rest.
- * Root route: no users -> /register; else no session -> /login; else /dashboard.
- *
- * Background: scheduler (8:30 AM schedule + 9 PM summary) + per-class watcher.
- * Telegram: ONE bot (@qums_attendance_bot, polling mode) — har user apne
- * dashboard se deep-link connect karta hai; sends uske apne chat pe jaate hain.
- *
- * Run: npm start
- */
+
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
@@ -25,7 +6,7 @@ const fs = require('fs');
 const session = require('express-session');
 const FileStore = require('session-file-store')(session);
 const bcrypt = require('bcryptjs');
-const nodemailer = require('nodemailer');
+const mailer = require('./mailer');
 
 const db = require('./db');
 const { encryptSecret } = require('./crypto');
@@ -97,22 +78,25 @@ app.use(
 );
 
 // ---- helpers ----
-function currentUser(req) {
+async function currentUser(req) {
   if (!req.session || !req.session.userId) return null;
-  return db.getUserById(req.session.userId);
+  return await db.getUserById(req.session.userId);
 }
 
 /** Pages -> redirect /login; APIs -> 401 JSON. /api/auth/* aur /health public rehte hain. */
-function requireAuth(req, res, next) {
-  const user = currentUser(req);
-  if (user) {
-    req.appUser = user;
-    return next();
+async function requireAuth(req, res, next) {
+  try {
+    const user = await currentUser(req);
+    if (user) {
+      req.appUser = user;
+      return next();
+    }
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Login required', code: 'AUTH_REQUIRED' });
+    return res.redirect('/login');
+  } catch (err) {
+    console.error('[auth] lookup failed:', err.message);
+    return res.status(500).json({ error: 'Authentication service temporarily unavailable.' });
   }
-  if (req.path.startsWith('/api/')) {
-    return res.status(401).json({ error: 'Login required', code: 'AUTH_REQUIRED' });
-  }
-  return res.redirect('/login');
 }
 
 function httpStatusFor(err) {
@@ -162,9 +146,9 @@ function safeServerError(res, err) {
 }
 
 // ---- page routes ----
-app.get('/', (req, res) => {
-  if (!db.hasUsers()) return res.redirect('/register');
-  if (!currentUser(req)) return res.redirect('/login');
+app.get('/', async (req, res) => {
+  if (!(await db.hasUsers())) return res.redirect('/register');
+  if (!(await currentUser(req))) return res.redirect('/login');
   return res.redirect('/dashboard');
 });
 
@@ -174,10 +158,43 @@ app.get('/login', sendPage('login.html'));
 app.get('/forgot', sendPage('forgot.html'));
 app.get('/reset', sendPage('reset.html'));
 
+function withQumsResetControl(html) {
+  const script = `
+<script>
+(() => {
+  function addReset() {
+    if (document.getElementById('permanentQumsResetBtn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'permanentQumsResetBtn';
+    btn.type = 'button';
+    btn.textContent = 'Reset / Delete QUMS Connection';
+    Object.assign(btn.style, { position:'fixed', right:'18px', bottom:'18px', zIndex:'99999', padding:'10px 14px', border:'1px solid #b91c1c', borderRadius:'8px', background:'#fff', color:'#b91c1c', cursor:'pointer', fontWeight:'700', boxShadow:'0 4px 14px rgba(0,0,0,.12)' });
+    btn.onclick = async () => {
+      if (!confirm('QUMS connection permanently reset karna hai? Saved QID/password aur session delete ho jayenge.')) return;
+      btn.disabled = true; btn.textContent = 'Resetting...';
+      try {
+        const r = await fetch('/api/qums-reset', { method:'POST', headers:{'Content-Type':'application/json'} });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'Reset failed');
+        window.location.href = j.redirect || '/qums-setup';
+      } catch (e) { alert(e.message || 'QUMS reset failed'); btn.disabled = false; btn.textContent = 'Reset / Delete QUMS Connection'; }
+    };
+    document.body.appendChild(btn);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addReset); else addReset();
+})();
+</script>`;
+  return html.includes('</body>') ? html.replace('</body>', script + '</body>') : html + script;
+}
+
 app.get('/dashboard', requireAuth, (req, res) => {
-  res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+  const file = path.join(PUBLIC_DIR, 'index.html');
+  res.send(withQumsResetControl(fs.readFileSync(file, 'utf8')));
 });
-app.get('/qums-setup', requireAuth, sendPage('qums-setup.html'));
+app.get('/qums-setup', requireAuth, (req, res) => {
+  const file = path.join(PUBLIC_DIR, 'qums-setup.html');
+  res.send(withQumsResetControl(fs.readFileSync(file, 'utf8')));
+});
 
 app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
@@ -191,11 +208,11 @@ app.post('/api/register', rateLimit('/api/register'), async (req, res) => {
     if (!password || String(password).length < 6) {
       return res.status(400).json({ error: 'Password kam se kam 6 characters ka hona chahiye.' });
     }
-    if (db.getUserByEmail(email)) {
+    if (await db.getUserByEmail(email)) {
       return res.status(409).json({ error: 'Ye email already registered hai — Login karo.' });
     }
     const passwordHash = await bcrypt.hash(String(password), 10);
-    const user = db.createUser({ email, passwordHash });
+    const user = await db.createUser({ email, passwordHash });
     req.session.userId = user.id; // auto-login after register
     res.json({ ok: true, redirect: '/qums-setup' });
   } catch (err) {
@@ -206,9 +223,9 @@ app.post('/api/register', rateLimit('/api/register'), async (req, res) => {
 app.post('/api/login', rateLimit('/api/login'), async (req, res) => {
   try {
     const { email, password } = req.body || {};
-    const user = db.getUserByEmail(email);
+    const user = await db.getUserByEmail(email);
     if (!user || !(await bcrypt.compare(String(password || ''), user.passwordHash))) {
-      return res.status(401).json({ error: 'Email ya password galat hai.' });
+      return res.status(401).json({ error: 'wrong email or password.' });
     }
     req.session.userId = user.id;
     res.json({ ok: true, redirect: user.qumsSessionPath ? '/dashboard' : '/qums-setup' });
@@ -217,49 +234,45 @@ app.post('/api/login', rateLimit('/api/login'), async (req, res) => {
   }
 });
 
-/** Always-ok response (user enumeration se bachne ke liye). SMTP optional. */
+/**
+ * Always-ok response (user enumeration se bachne ke liye).
+ * Email delivery: RESEND_API_KEY (Resend) -> SMTP fallback -> local console.
+ */
 app.post('/api/forgot', rateLimit('/api/forgot'), async (req, res) => {
   try {
     const { email } = req.body || {};
-    const user = db.getUserByEmail(email);
+    const user = await db.getUserByEmail(email);
     if (user) {
       const token = require('crypto').randomBytes(24).toString('hex');
-      db.storeResetToken(user.email, token);
+      await db.storeResetToken(user.email, token);
       // BASE_URL: APP_BASE_URL || RENDER_EXTERNAL_URL || localhost (normalized) —
       // production me localhost KABHI nahi (Render pe upar wale dono set hote hain).
       const link = `${BASE_URL}/reset?token=${token}`;
-      const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM } = process.env;
-      if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
-        const mailer = nodemailer.createTransport({
-          host: SMTP_HOST,
-          port: Number(SMTP_PORT) || 587,
-          secure: Number(SMTP_PORT) === 465, // 465 = implicit TLS, 587 = STARTTLS
-          auth: { user: SMTP_USER, pass: SMTP_PASS },
-          // SMTP down/unreachable ho to request 2 min tak hang na ho:
-          connectionTimeout: 15000,
-          greetingTimeout: 15000,
-          socketTimeout: 20000,
-        });
-        await mailer.sendMail({
-          from: SMTP_FROM || SMTP_USER,
-          to: user.email,
-          subject: 'QUMS Attendance Bot — password reset',
-          text: `Password reset link (1 hour valid):\n${link}`,
-          html: `<p>Password reset link (1 hour valid):</p><p><a href="${link}">${link}</a></p>`,
-        });
-        console.log(`[auth] reset email sent -> ${user.email}`);
-      } else if (IS_PROD) {
-        // Production + no SMTP: token links ko logs me expose NAHI karte.
-        console.error('[auth] SMTP configured nahi hai — password-reset link deliver nahi hoga.');
-        console.error('[auth] Fix: Render env me SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS set karo (email delivery).');
+      const emailContent = mailer.buildResetEmail(link);
+      // sendMail kabhi throw nahi karta — { ok, via, error? } deta hai.
+      const result = await mailer.sendMail({ to: user.email, ...emailContent });
+      if (result.ok) {
+        console.log(`[auth] reset email sent via ${result.via} -> ${user.email}`);
+      } else if (result.via === 'console') {
+        if (IS_PROD) {
+          // Production: token links ko logs me expose NAHI karte.
+          console.error('[auth] RESEND_API_KEY / SMTP configured nahi hai — password-reset link deliver nahi hoga.');
+          console.error('[auth] Fix: Render env me RESEND_API_KEY (+ RESEND_FROM, verified domain) ya SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS set karo.');
+        } else {
+          // Dev-only convenience: bina provider ke link console me (local testing).
+          console.log(`\n[auth] PASSWORD RESET LINK for ${user.email} (1h valid):\n${link}\n`);
+        }
       } else {
-        // Dev-only convenience: bina SMTP ke link console me (local testing).
-        console.log(`\n[auth] PASSWORD RESET LINK for ${user.email} (1h valid):\n${link}\n`);
+        console.error(`[auth] reset email send FAILED via ${result.via}: ${result.error}`);
+        if (!IS_PROD) {
+          // Dev fallback: send fail hua to link console me (local testing ke liye).
+          console.log(`\n[auth] (dev fallback) PASSWORD RESET LINK for ${user.email} (1h valid):\n${link}\n`);
+        }
       }
     }
     res.json({
       ok: true,
-      message: 'Agar ye email registered hai to reset link bana diya gaya hai. (SMTP configured ho to email aayega, warna server console me link print hota hai.)',
+      message: 'Agar ye email registered hai to reset link bana diya gaya hai. (Resend/SMTP configured ho to email aayega, warna local dev me server console me link print hota hai.)',
     });
   } catch (err) {
     safeServerError(res, err);
@@ -272,10 +285,10 @@ app.post('/api/reset', rateLimit('/api/reset'), async (req, res) => {
     if (!token || !password || String(password).length < 6) {
       return res.status(400).json({ error: 'Token + new password (min 6 chars) chahiye.' });
     }
-    const user = db.consumeResetToken(token);
+    const user = await db.consumeResetToken(token);
     if (!user) return res.status(400).json({ error: 'Reset link invalid ya expire ho gaya hai.' });
     const passwordHash = await bcrypt.hash(String(password), 10);
-    db.updateUser(user.id, { passwordHash });
+    await db.updateUser(user.id, { passwordHash });
     console.log(`[auth] password reset done -> ${user.email}`);
     res.json({ ok: true, redirect: '/login' });
   } catch (err) {
@@ -284,8 +297,8 @@ app.post('/api/reset', rateLimit('/api/reset'), async (req, res) => {
 });
 
 // ---- protected data APIs (per-user) ----
-app.get('/api/me', requireAuth, (req, res) => {
-  const user = db.getUserById(req.session.userId);
+app.get('/api/me', requireAuth, async (req, res) => {
+  const user = await db.getUserById(req.session.userId);
   res.json({
     email: user.email,
     qumsQid: user.qumsQid || '',
@@ -322,8 +335,8 @@ app.get('/api/today', requireAuth, async (req, res) => {
 });
 
 /** Accurate Telegram-blocker error (token missing vs not-linked confuse na ho). */
-function telegramSendBlockError(userId) {
-  const reason = telegram.sendBlockerReason(userId);
+async function telegramSendBlockError(userId) {
+  const reason = await telegram.sendBlockerReason(userId);
   if (reason === 'not-configured') {
     return Object.assign(new Error('Telegram token set nahi hai (.env: TELEGRAM_BOT_TOKEN) — BotFather ka token daal ke server restart karo.'), { name: 'TelegramNotConfigured' });
   }
@@ -340,7 +353,7 @@ app.all('/api/trigger-telegram', requireAuth, async (req, res) => {
     const analysis = analyzeAttendance(subjects);
     const preview = formatAttendanceMessage(analysis);
     const sent = await sendMessage(req.appUser.id, preview);
-    if (!sent) throw telegramSendBlockError(req.appUser.id);
+    if (!sent) throw await telegramSendBlockError(req.appUser.id);
     res.json({ success: true, sentTo: req.appUser.email, preview });
   } catch (err) {
     res.status(httpStatusFor(err)).json({ error: err.message, hint: err.hint || null, code: err.name });
@@ -383,13 +396,29 @@ app.post('/api/qums-login/submit-captcha', requireAuth, async (req, res) => {
 });
 
 // ---- QUMS logout (manual) — session delete; creds DB me rehte hain (Reconnect sirf captcha) ----
-app.post('/api/qums-logout', requireAuth, (req, res) => {
+app.post('/api/qums-reset', requireAuth, async (req, res) => {
+  try {
+    const user = await db.getUserById(req.appUser.id);
+    const sp = user && user.qumsSessionPath;
+    if (sp && fs.existsSync(sp)) { try { fs.unlinkSync(sp); } catch {} }
+    await db.updateUser(req.appUser.id, {
+      qumsQid: '',
+      qumsPasswordEncrypted: '',
+      qumsSessionPath: '',
+    });
+    res.json({ ok: true, redirect: '/qums-setup', message: 'QUMS connection permanently reset. Ab QID/password dobara enter karo.' });
+  } catch (err) {
+    safeServerError(res, err);
+  }
+});
+
+app.post('/api/qums-logout', requireAuth, async (req, res) => {
   try {
     const sp = req.appUser.qumsSessionPath;
     if (sp && fs.existsSync(sp)) {
       try { fs.unlinkSync(sp); } catch {}
     }
-    db.updateUser(req.appUser.id, { qumsSessionPath: '' });
+    await db.updateUser(req.appUser.id, { qumsSessionPath: '' });
     res.json({
       ok: true,
       message: 'QUMS logout — session delete ho gayi. Reconnect karne ke liye QUMS Setup → "Reconnect QUMS" (sirf captcha).',
@@ -408,13 +437,13 @@ app.all('/api/scheduler/run', requireAuth, async (req, res) => {
     if (morning) {
       const { text } = await getMorningScheduleText(req.appUser); // cache-first merged
       const sent = await sendMessage(req.appUser.id, text);
-      if (!sent) throw telegramSendBlockError(req.appUser.id);
+      if (!sent) throw await telegramSendBlockError(req.appUser.id);
       res.json({ success: true, message: 'Morning schedule message sent (aaj ki classes).' });
     } else {
       const subjects = await scrapeAttendance({ sessionPath: runtime.sessionPath });
       const analysis = analyzeAttendance(subjects);
       const sent = await sendMessage(req.appUser.id, formatAttendanceMessage(analysis));
-      if (!sent) throw telegramSendBlockError(req.appUser.id);
+      if (!sent) throw await telegramSendBlockError(req.appUser.id);
       res.json({ success: true, message: '9 PM-style summary sent.' });
     }
   } catch (err) {
@@ -434,18 +463,29 @@ app.post('/api/schedule/refresh', requireAuth, async (req, res) => {
 });
 
 // ---- Telegram linking (deep-link flow — koi QR nahi) ----
-app.get('/api/telegram/status', requireAuth, (req, res) => {
-  const code = db.telegramLinkCodeFor(req.appUser.id);
+// app.get('/api/telegram/status', requireAuth, async (req, res) => {
+//   const code = await db.telegramLinkCodeFor(req.appUser.id);
+//   res.json({
+//     configured: telegram.isConfigured(),
+//     connected: Boolean(req.appUser.telegramChatId),
+//     botUsername: telegram.getBotUsername(),
+//     linkUrl: telegram.deepLink(code),
+//   });
+// });
+app.get('/api/telegram/status', requireAuth, async (req, res) => {
+  const user = await db.getUserById(req.appUser.id);
+  const code = await db.telegramLinkCodeFor(req.appUser.id);
+
   res.json({
     configured: telegram.isConfigured(),
-    connected: Boolean(req.appUser.telegramChatId),
+    connected: Boolean(user?.telegramChatId),
     botUsername: telegram.getBotUsername(),
     linkUrl: telegram.deepLink(code),
   });
 });
 
-app.post('/api/telegram/unlink', requireAuth, (req, res) => {
-  db.clearTelegramChatId(req.appUser.id);
+app.post('/api/telegram/unlink', requireAuth, async (req, res) => {
+  await db.clearTelegramChatId(req.appUser.id);
   res.json({ ok: true, message: 'Telegram disconnected. Dobara connect karne ke liye "Connect Telegram" dabao.' });
 });
 
@@ -482,11 +522,14 @@ process.on('uncaughtException', (err) => {
 });
 
 // ---- boot ----
-startScheduler();
-startWatcher();
-telegram.initTelegram();
+(async () => {
+  try {
+    await db.init();
+    startScheduler();
+    startWatcher();
+    telegram.initTelegram();
 
-app.listen(PORT, () => {
+    app.listen(PORT, () => {
   console.log(`[server] QUMS Attendance Bot (multi-user) running at ${BASE_URL}`);
   console.log(`[server] (listening on 0.0.0.0:${PORT}${IS_PROD ? ', production mode' : ', development mode'})`);
   console.log('[server] Pages: /register /login /dashboard /qums-setup /forgot /reset');
@@ -496,4 +539,9 @@ app.listen(PORT, () => {
   if (!telegram.isConfigured()) {
     console.log('[server] Telegram: DISABLED — TELEGRAM_BOT_TOKEN set karo (Render env ya .env) aur restart; bina iske server theek chalega.');
   }
-});
+    });
+  } catch (err) {
+    console.error('[server] database boot failed:', err);
+    process.exit(1);
+  }
+})();

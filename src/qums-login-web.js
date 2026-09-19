@@ -72,7 +72,7 @@ async function captureCaptchaFor(pendingLogin) {
 async function startQumsLogin(userId, credsOverride, log = console) {
   let qid;
   let password;
-  const user = db.getUserById(userId);
+  const user = await db.getUserById(userId);
   if (credsOverride && credsOverride.qid && credsOverride.password) {
     qid = String(credsOverride.qid).trim();
     password = String(credsOverride.password);
@@ -170,7 +170,7 @@ async function submitQumsCaptcha(userId, captchaText, log = console) {
   await disposePending(userId);
 
   // Persist QID + encrypted password + session path — setup COMPLETE.
-  completeQumsSetup(userId, p.qid, p.password);
+  await completeQumsSetup(userId, p.qid, p.password);
   log.log(`[qums-login] QUMS session saved for user ${userId} -> ${sessionPath}`);
   return { ok: true, sessionPath };
 }
